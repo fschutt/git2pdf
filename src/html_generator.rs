@@ -18,7 +18,7 @@ pub fn generate_html_for_crate(
     crate_info: &CrateInfo,
     files: &[&SourceFile],
     syntax_set: &SyntaxSet,
-    theme: &Theme,
+    theme: Option<&Theme>,
     font_size: f32,
     columns: u32,
 ) -> Result<String> {
@@ -40,14 +40,18 @@ pub fn generate_html_for_crate(
 }
 
 /// Generate HTML header with CSS styling
-fn generate_html_header(crate_info: &CrateInfo, font_size: f32, columns: u32, theme: &Theme) -> String {
-    let bg_color = theme.settings.background
-        .map(|c| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b))
-        .unwrap_or_else(|| "#ffffff".to_string());
-    
-    let fg_color = theme.settings.foreground
-        .map(|c| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b))
-        .unwrap_or_else(|| "#000000".to_string());
+fn generate_html_header(crate_info: &CrateInfo, font_size: f32, columns: u32, theme: Option<&Theme>) -> String {
+    let (bg_color, fg_color) = if let Some(t) = theme {
+        let bg = t.settings.background
+            .map(|c| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b))
+            .unwrap_or_else(|| "#ffffff".to_string());
+        let fg = t.settings.foreground
+            .map(|c| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b))
+            .unwrap_or_else(|| "#000000".to_string());
+        (bg, fg)
+    } else {
+        ("#ffffff".to_string(), "#000000".to_string())
+    };
 
     format!(r#"<!DOCTYPE html>
 <html lang="en">
@@ -193,16 +197,10 @@ fn generate_html_header(crate_info: &CrateInfo, font_size: f32, columns: u32, th
 fn generate_html_for_file(
     file: &SourceFile,
     syntax_set: &SyntaxSet,
-    theme: &Theme,
+    theme: Option<&Theme>,
 ) -> Result<String> {
     let content = fs::read_to_string(&file.path)
         .with_context(|| format!("Failed to read file: {}", file.path.display()))?;
-    
-    // Get syntax for Rust
-    let syntax = syntax_set.find_syntax_by_extension("rs")
-        .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
-    
-    let mut highlighter = HighlightLines::new(syntax, theme);
     
     let mut html = String::new();
     
@@ -218,30 +216,47 @@ fn generate_html_for_file(
         html_escape(&file.relative_path.to_string_lossy()),
     ));
     
-    // Highlight each line
-    for (line_num, line) in LinesWithEndings::from(&content).enumerate() {
-        let highlighted = highlighter.highlight_line(line, syntax_set)
-            .unwrap_or_else(|_| vec![(Style::default(), line)]);
+    // Highlight each line (or just escape if no theme)
+    if let Some(theme) = theme {
+        // Get syntax for Rust
+        let syntax = syntax_set.find_syntax_by_extension("rs")
+            .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
         
-        html.push_str(&format!(
-            r#"<span class="line"><span class="line-number">{}</span><span class="line-content">"#,
-            line_num + 1
-        ));
+        let mut highlighter = HighlightLines::new(syntax, theme);
         
-        for (style, text) in highlighted {
-            let css = style_to_css(&style);
-            if css.is_empty() {
-                html.push_str(&html_escape(text));
-            } else {
-                html.push_str(&format!(
-                    r#"<span style="{}">{}</span>"#,
-                    css,
-                    html_escape(text)
-                ));
+        for (line_num, line) in LinesWithEndings::from(&content).enumerate() {
+            let highlighted = highlighter.highlight_line(line, syntax_set)
+                .unwrap_or_else(|_| vec![(Style::default(), line)]);
+            
+            html.push_str(&format!(
+                r#"<span class="line"><span class="line-number">{}</span><span class="line-content">"#,
+                line_num + 1
+            ));
+            
+            for (style, text) in highlighted {
+                let css = style_to_css(&style);
+                if css.is_empty() {
+                    html.push_str(&html_escape(text));
+                } else {
+                    html.push_str(&format!(
+                        r#"<span style="{}">{}</span>"#,
+                        css,
+                        html_escape(text)
+                    ));
+                }
             }
+            
+            html.push_str("</span></span>");
         }
-        
-        html.push_str("</span></span>");
+    } else {
+        // No syntax highlighting - just plain text with line numbers
+        for (line_num, line) in LinesWithEndings::from(&content).enumerate() {
+            html.push_str(&format!(
+                r#"<span class="line"><span class="line-number">{}</span><span class="line-content">{}</span></span>"#,
+                line_num + 1,
+                html_escape(line)
+            ));
+        }
     }
     
     html.push_str("</pre>\n</div>\n");

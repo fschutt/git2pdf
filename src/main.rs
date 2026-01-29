@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use printpdf::{GeneratePdfOptions, PdfDocument, PdfSaveOptions};
-use syntect::highlighting::ThemeSet;
+use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
 mod crate_discovery;
@@ -41,29 +41,13 @@ struct Args {
     #[arg(short, long, default_value = ".")]
     output: PathBuf,
 
-    /// Paper width in mm (default: 210 for A4)
-    #[arg(long, default_value = "210.0")]
-    paper_width: f32,
+    /// Paper size as WIDTHxHEIGHT in mm (default: 210x297 for A4)
+    #[arg(long, default_value = "210x297")]
+    paper_size: String,
 
-    /// Paper height in mm (default: 297 for A4)
-    #[arg(long, default_value = "297.0")]
-    paper_height: f32,
-
-    /// Top margin in mm
-    #[arg(long, default_value = "10.0")]
-    margin_top: f32,
-
-    /// Right margin in mm
-    #[arg(long, default_value = "10.0")]
-    margin_right: f32,
-
-    /// Bottom margin in mm
-    #[arg(long, default_value = "10.0")]
-    margin_bottom: f32,
-
-    /// Left margin in mm
-    #[arg(long, default_value = "10.0")]
-    margin_left: f32,
+    /// Margins in mm, CSS-style: "all", "vertical horizontal", or "top right bottom left" (default: 10)
+    #[arg(long, default_value = "10")]
+    margins: String,
 
     /// Font size in points for code
     #[arg(long, default_value = "8.0")]
@@ -77,7 +61,7 @@ struct Args {
     #[arg(long)]
     include_tests: bool,
 
-    /// Syntax highlighting theme (default: InspiredGitHub)
+    /// Syntax highlighting theme, or "none" to disable (default: InspiredGitHub)
     #[arg(long, default_value = "InspiredGitHub")]
     theme: String,
 
@@ -94,12 +78,50 @@ struct Args {
     temp_dir: Option<PathBuf>,
 }
 
+/// Parse paper size from "WIDTHxHEIGHT" format (in mm)
+fn parse_paper_size(s: &str) -> Result<(f32, f32)> {
+    let parts: Vec<&str> = s.split('x').collect();
+    if parts.len() != 2 {
+        bail!("Invalid paper size format. Expected WIDTHxHEIGHT (e.g., 210x297)");
+    }
+    let width: f32 = parts[0].trim().parse()
+        .context("Invalid paper width")?;
+    let height: f32 = parts[1].trim().parse()
+        .context("Invalid paper height")?;
+    Ok((width, height))
+}
+
+/// Parse margins from CSS-style format (in mm)
+/// Accepts: "all", "vertical horizontal", or "top right bottom left"
+fn parse_margins(s: &str) -> Result<(f32, f32, f32, f32)> {
+    let parts: Vec<f32> = s.split_whitespace()
+        .map(|p| p.trim().parse::<f32>())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("Invalid margin value")?;
+    
+    match parts.len() {
+        1 => Ok((parts[0], parts[0], parts[0], parts[0])),
+        2 => Ok((parts[0], parts[1], parts[0], parts[1])), // vertical, horizontal
+        4 => Ok((parts[0], parts[1], parts[2], parts[3])), // top, right, bottom, left
+        _ => bail!("Invalid margins format. Expected 1, 2, or 4 values (e.g., \"10\", \"10 20\", or \"10 20 10 20\")"),
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    // Parse paper size
+    let (paper_width, paper_height) = parse_paper_size(&args.paper_size)?;
+    
+    // Parse margins (top, right, bottom, left)
+    let (margin_top, margin_right, margin_bottom, margin_left) = parse_margins(&args.margins)?;
 
     if args.verbose {
         println!("git2pdf - Converting repository to PDF");
         println!("Source: {}", args.source);
+        println!("Paper size: {}x{} mm", paper_width, paper_height);
+        println!("Margins: top={}, right={}, bottom={}, left={} mm", 
+                 margin_top, margin_right, margin_bottom, margin_left);
     }
 
     // Determine if source is a URL or local path
@@ -174,12 +196,16 @@ fn main() -> Result<()> {
     // Create output directory
     fs::create_dir_all(&args.output)?;
 
-    // Load syntax highlighting
+    // Load syntax highlighting (None if theme is "none")
     let syntax_set = SyntaxSet::load_defaults_newlines();
     let theme_set = ThemeSet::load_defaults();
-    let theme = theme_set.themes.get(&args.theme)
-        .or_else(|| theme_set.themes.get("InspiredGitHub"))
-        .context("Failed to load syntax theme")?;
+    let theme: Option<&Theme> = if args.theme.to_lowercase() == "none" {
+        None
+    } else {
+        Some(theme_set.themes.get(&args.theme)
+            .or_else(|| theme_set.themes.get("InspiredGitHub"))
+            .context("Failed to load syntax theme")?)
+    };
 
     // Process each crate
     for crate_info in crates_to_process {
@@ -218,12 +244,12 @@ fn main() -> Result<()> {
 
         // Generate PDF
         let options = GeneratePdfOptions {
-            page_width: Some(args.paper_width),
-            page_height: Some(args.paper_height),
-            margin_top: Some(args.margin_top),
-            margin_right: Some(args.margin_right),
-            margin_bottom: Some(args.margin_bottom),
-            margin_left: Some(args.margin_left),
+            page_width: Some(paper_width),
+            page_height: Some(paper_height),
+            margin_top: Some(margin_top),
+            margin_right: Some(margin_right),
+            margin_bottom: Some(margin_bottom),
+            margin_left: Some(margin_left),
             show_page_numbers: Some(true),
             header_text: Some(format!("{} - Code Review", crate_info.name)),
             ..Default::default()
