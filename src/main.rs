@@ -56,8 +56,8 @@ struct Args {
     #[arg(long, default_value = "6.0")]
     font_size: f32,
 
-    /// Number of columns for code layout (default: 2)
-    #[arg(long, default_value = "2")]
+    /// Number of columns for code layout (currently not fully supported)
+    #[arg(long, default_value = "1")]
     columns: u32,
 
     /// Include test files in output
@@ -91,6 +91,10 @@ struct Args {
     /// Path to a TTF font file to use for code (default: embedded RobotoMono-Bold)
     #[arg(long)]
     font: Option<PathBuf>,
+
+    /// Start each source file on a new page
+    #[arg(long)]
+    page_break: bool,
 }
 
 /// Parse paper size from "WIDTHxHEIGHT" format (in mm)
@@ -297,7 +301,15 @@ fn main() -> Result<()> {
             theme,
             args.font_size,
             args.columns,
+            args.page_break,
         )?;
+
+        // Optionally save HTML for debugging
+        if args.verbose {
+            let html_path = args.output.join(format!("{}.html", crate_info.name));
+            fs::write(&html_path, &html)?;
+            println!("  Saved HTML: {}", html_path.display());
+        }
 
         // Generate PDF
         let options = GeneratePdfOptions {
