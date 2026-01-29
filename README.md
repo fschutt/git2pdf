@@ -45,16 +45,12 @@ Arguments:
 Options:
   -r, --ref <REF>             Branch, tag, or commit to checkout
   -o, --output <OUTPUT>       Output directory for generated PDFs [default: .]
-      --paper-width <MM>      Paper width in mm [default: 210.0]
-      --paper-height <MM>     Paper height in mm [default: 297.0]
-      --margin-top <MM>       Top margin in mm [default: 10.0]
-      --margin-right <MM>     Right margin in mm [default: 10.0]
-      --margin-bottom <MM>    Bottom margin in mm [default: 10.0]
-      --margin-left <MM>      Left margin in mm [default: 10.0]
+      --paper-size <WxH>      Paper size as WIDTHxHEIGHT in mm [default: 210x297]
+      --margins <MARGINS>     Margins in mm, CSS-style: "all", "v h", or "t r b l" [default: 10]
       --font-size <PT>        Font size in points [default: 8.0]
       --columns <N>           Number of columns [default: 2]
       --include-tests         Include test files in output
-      --theme <THEME>         Syntax highlighting theme [default: InspiredGitHub]
+      --theme <THEME>         Syntax highlighting theme, or "none" to disable [default: InspiredGitHub]
   -v, --verbose               Verbose output
       --crates <CRATES>       Only process specific crates (comma-separated)
       --temp-dir <PATH>       Temporary directory for cloning
@@ -64,10 +60,10 @@ Options:
 
 ### Examples
 
-Print a repository with custom margins:
+Print a repository with custom paper size and margins:
 
 ```bash
-git2pdf https://github.com/rust-lang/rust --margin-top 15 --margin-bottom 15
+git2pdf https://github.com/rust-lang/rust --paper-size 200x280 --margins "15 20"
 ```
 
 Print only specific crates:
@@ -82,36 +78,27 @@ Include tests in the output:
 git2pdf . --include-tests
 ```
 
-Use a different theme:
+Use a different theme or disable syntax highlighting:
 
 ```bash
 git2pdf . --theme "Solarized (dark)"
+git2pdf . --theme none
 ```
 
 ## Supported Themes
 
-- InspiredGitHub (default)
-- Solarized (dark)
-- Solarized (light)
-- base16-ocean.dark
-- base16-eighties.dark
-- base16-mocha.dark
-- base16-ocean.light
-
-## Output
-
-The tool generates one PDF file per crate, named after the crate (e.g., `my-crate.pdf`).
-
-Each PDF contains:
-- A title page with crate information
-- All source files with syntax highlighting
-- Line numbers for easy reference
-- Multi-column layout for efficient space usage
+- `InspiredGitHub` (default)
+- `Solarized (dark)`
+- `Solarized (light)`
+- `base16-ocean.dark`
+- `base16-eighties.dark`
+- `base16-mocha.dark`
+- `base16-ocean.light`
+- `none` (disables syntax highlighting)
 
 ## Requirements
 
 - Rust 1.70 or later
-- Git (for cloning repositories)
 
 ## License
 
