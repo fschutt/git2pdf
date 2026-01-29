@@ -21,26 +21,37 @@ pub fn generate_html_for_crate(
     theme: Option<&Theme>,
     font_size: f32,
     columns: u32,
+    page_break: bool,
 ) -> Result<String> {
     let mut html = String::new();
     
     // HTML header with CSS
-    html.push_str(&generate_html_header(crate_info, font_size, columns, theme));
+    html.push_str(&generate_html_header(crate_info, font_size, columns, theme, page_break));
+    
+    // Open the content div that has column-count applied
+    if columns > 1 {
+        html.push_str("<div class=\"content\">\n");
+    }
     
     // Generate content for each file
     for file in files {
-        let file_html = generate_html_for_file(file, syntax_set, theme)?;
+        let file_html = generate_html_for_file(file, syntax_set, theme, font_size)?;
         html.push_str(&file_html);
     }
     
+    // Close content div if using columns
+    if columns > 1 {
+        html.push_str("</div>\n");
+    }
+    
     // Close HTML
-    html.push_str("</div>\n</body>\n</html>");
+    html.push_str("</body>\n</html>");
     
     Ok(html)
 }
 
 /// Generate HTML header with CSS styling
-fn generate_html_header(crate_info: &CrateInfo, font_size: f32, columns: u32, theme: Option<&Theme>) -> String {
+fn generate_html_header(crate_info: &CrateInfo, font_size: f32, columns: u32, theme: Option<&Theme>, page_break: bool) -> String {
     let (bg_color, fg_color) = if let Some(t) = theme {
         let bg = t.settings.background
             .map(|c| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b))
@@ -52,64 +63,64 @@ fn generate_html_header(crate_info: &CrateInfo, font_size: f32, columns: u32, th
     } else {
         ("#ffffff".to_string(), "#000000".to_string())
     };
+    
+    let page_break_css = if page_break {
+        "page-break-after: always;"
+    } else {
+        ""
+    };
+    
+    // Column CSS only if columns > 1
+    let column_css = if columns > 1 {
+        format!(r#"
+        .content {{
+            column-count: {columns};
+            column-gap: 10px;
+            column-rule: 1px solid #ddd;
+        }}"#, columns = columns)
+    } else {
+        String::new()
+    };
 
     format!(r#"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{name} - Code Review</title>
     <style>
-        @page {{
-            size: A4;
-            margin: 5mm;
-        }}
-        
         * {{
             box-sizing: border-box;
+            margin: 0;
+            padding: 0;
         }}
         
         body {{
-            font-family: 'RobotoMono', 'Fira Code', 'Source Code Pro', 'Consolas', 'Monaco', monospace;
+            font-family: 'RobotoMono', monospace;
             font-size: {font_size}pt;
             line-height: 1.2;
-            margin: 0;
-            padding: 0;
             background-color: {bg_color};
             color: {fg_color};
         }}
-        
-        .content {{
-            column-count: {columns};
-            column-gap: 10px;
-            column-rule: 1px solid #ddd;
-            padding: 5px;
-        }}
-        
+        {column_css}
         .file-section {{
-            break-inside: avoid-column;
-            margin-bottom: 10px;
-            page-break-inside: avoid;
+            margin-bottom: 5px;
+            {page_break_css}
         }}
         
         .file-header {{
-            background-color: #e8e8e8;
+            background-color: #e0e0e0;
             color: #333;
-            padding: 3px 8px;
+            padding: 2px 5px;
             font-weight: bold;
             font-size: {header_size}pt;
             border-bottom: 1px solid #999;
-            margin-bottom: 3px;
-            break-after: avoid;
         }}
         
         .code-block {{
-            margin: 0;
-            padding: 3px;
-            overflow-x: hidden;
             white-space: pre-wrap;
             word-wrap: break-word;
             font-size: {font_size}pt;
+            font-family: 'RobotoMono', monospace;
             line-height: 1.15;
         }}
         
@@ -119,11 +130,10 @@ fn generate_html_header(crate_info: &CrateInfo, font_size: f32, columns: u32, th
         
         .line-number {{
             display: inline-block;
-            width: 3em;
+            width: 2.5em;
             text-align: right;
-            padding-right: 1em;
-            color: #999;
-            user-select: none;
+            padding-right: 0.5em;
+            color: #888;
             font-size: {line_num_size}pt;
         }}
         
@@ -132,54 +142,43 @@ fn generate_html_header(crate_info: &CrateInfo, font_size: f32, columns: u32, th
         }}
 
         h1 {{
-            font-size: 16pt;
-            margin: 10px 0;
-            padding: 10px;
+            font-size: 18pt;
+            padding: 8px;
             background-color: #333;
             color: white;
-            column-span: all;
         }}
 
         .crate-info {{
-            column-span: all;
-            padding: 10px;
-            background-color: #f5f5f5;
-            margin-bottom: 20px;
-            border-left: 4px solid #333;
-        }}
-
-        .crate-info h2 {{
-            margin: 0 0 5px 0;
-            font-size: 14pt;
+            padding: 8px;
+            background-color: #f0f0f0;
+            margin-bottom: 10px;
+            border-left: 3px solid #333;
         }}
 
         .crate-info p {{
-            margin: 5px 0;
-            font-size: 10pt;
-            color: #666;
+            margin: 2px 0;
+            font-size: 9pt;
+            color: #555;
         }}
     </style>
 </head>
 <body>
     <h1>{name} v{version}</h1>
     <div class="crate-info">
-        <h2>{name}</h2>
-        <p>Version: {version}</p>
+        <p><b>{name}</b> - Version {version}</p>
         {description}
-        <p>Files: {file_count}</p>
     </div>
-    <div class="content">
 "#,
         name = html_escape(&crate_info.name),
         version = html_escape(&crate_info.version),
         description = crate_info.description.as_ref()
             .map(|d| format!("<p>{}</p>", html_escape(d)))
             .unwrap_or_default(),
-        file_count = 0, // Will be updated
         font_size = font_size,
         header_size = font_size + 1.0,
-        line_num_size = font_size - 0.5,
-        columns = columns,
+        line_num_size = font_size,
+        column_css = column_css,
+        page_break_css = page_break_css,
         bg_color = bg_color,
         fg_color = fg_color,
     )
@@ -190,6 +189,7 @@ fn generate_html_for_file(
     file: &SourceFile,
     syntax_set: &SyntaxSet,
     theme: Option<&Theme>,
+    _font_size: f32,
 ) -> Result<String> {
     let content = fs::read_to_string(&file.path)
         .with_context(|| format!("Failed to read file: {}", file.path.display()))?;
@@ -199,8 +199,8 @@ fn generate_html_for_file(
     // File section - show relative path from crate root
     html.push_str(&format!(
         r#"<div class="file-section">
-    <div class="file-header">{}</div>
-    <pre class="code-block">"#,
+<div class="file-header">{}</div>
+<pre class="code-block">"#,
         html_escape(&file.relative_path.to_string_lossy()),
     ));
     
@@ -234,13 +234,16 @@ fn generate_html_for_file(
                 }
             }
             
-            html.push_str("</span></span>");
+            // Close the line content and line spans, then add a newline
+            // The newline is important for the PDF layout engine to recognize line breaks
+            html.push_str("</span></span>\n");
         }
     } else {
         // No syntax highlighting - just plain text with line numbers
         for (line_num, line) in LinesWithEndings::from(&content).enumerate() {
             html.push_str(&format!(
-                r#"<span class="line"><span class="line-number">{}</span><span class="line-content">{}</span></span>"#,
+                r#"<span class="line"><span class="line-number">{}</span><span class="line-content">{}</span></span>
+"#,
                 line_num + 1,
                 html_escape(line)
             ));
