@@ -1,0 +1,49 @@
+[package]
+name = "git2pdf"
+version = "0.1.0"
+edition = "2021"
+description = "Convert git repositories to PDF for code review"
+license = "MIT"
+repository = "https://github.com/fschutt/git2pdf"
+keywords = ["git", "pdf", "code-review", "rust"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+# Git operations using gitoxide
+gix = { version = "0.72", default-features = false, features = [
+    "blocking-network-client",
+    "blocking-http-transport-reqwest-rust-tls",
+    "worktree-mutation",
+    "excludes",
+    "attributes",
+] }
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# PDF generation with HTML support
+printpdf = { version = "0.9", features = ["html"] }
+
+# Syntax highlighting
+syntect = "5"
+
+# Cargo.toml parsing
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Parallel processing
+rayon = "1"
+
+# Gitignore-aware file walking
+ignore = "0.4"
+
+# URL parsing
+url = "2"
+
+[[bin]]
+name = "git2pdf"
+path = "src/main.rs"
