@@ -6,11 +6,14 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use printpdf::{GeneratePdfOptions, PdfDocument, PdfSaveOptions};
+use ignore::WalkBuilder;
+use printpdf::{Base64OrRaw, GeneratePdfOptions, PdfDocument, PdfSaveOptions};
 use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
@@ -45,12 +48,12 @@ struct Args {
     #[arg(long, default_value = "210x297")]
     paper_size: String,
 
-    /// Margins in mm, CSS-style: "all", "vertical horizontal", or "top right bottom left" (default: 10)
-    #[arg(long, default_value = "10")]
+    /// Margins in mm, CSS-style: "all", "vertical horizontal", or "top right bottom left" (default: 5)
+    #[arg(long, default_value = "5")]
     margins: String,
 
     /// Font size in points for code
-    #[arg(long, default_value = "8.0")]
+    #[arg(long, default_value = "6.0")]
     font_size: f32,
 
     /// Number of columns for code layout (default: 2)
@@ -76,6 +79,18 @@ struct Args {
     /// Temporary directory for cloning (default: system temp)
     #[arg(long)]
     temp_dir: Option<PathBuf>,
+
+    /// Skip running cargo fmt on cloned repositories
+    #[arg(long)]
+    no_fmt: bool,
+
+    /// Line width for rustfmt (default: 80)
+    #[arg(long, default_value = "80")]
+    line_width: u32,
+
+    /// Path to a TTF font file to use for code (default: embedded RobotoMono-Bold)
+    #[arg(long)]
+    font: Option<PathBuf>,
 }
 
 /// Parse paper size from "WIDTHxHEIGHT" format (in mm)
@@ -109,6 +124,7 @@ fn parse_margins(s: &str) -> Result<(f32, f32, f32, f32)> {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let start = Instant::now();
 
     // Parse paper size
     let (paper_width, paper_height) = parse_paper_size(&args.paper_size)?;
@@ -117,63 +133,101 @@ fn main() -> Result<()> {
     let (margin_top, margin_right, margin_bottom, margin_left) = parse_margins(&args.margins)?;
 
     if args.verbose {
-        println!("git2pdf - Converting repository to PDF");
-        println!("Source: {}", args.source);
-        println!("Paper size: {}x{} mm", paper_width, paper_height);
-        println!("Margins: top={}, right={}, bottom={}, left={} mm", 
-                 margin_top, margin_right, margin_bottom, margin_left);
+        println!("[{:?}] git2pdf - Converting repository to PDF", start.elapsed());
+        println!("[{:?}] Source: {}", start.elapsed(), args.source);
+        println!("[{:?}] Paper size: {}x{} mm", start.elapsed(), paper_width, paper_height);
+        println!("[{:?}] Margins: top={}, right={}, bottom={}, left={} mm", 
+                 start.elapsed(), margin_top, margin_right, margin_bottom, margin_left);
     }
 
     // Determine if source is a URL or local path
-    let repo_path = if args.source.starts_with("http://") 
+    let is_remote = args.source.starts_with("http://") 
         || args.source.starts_with("https://") 
         || args.source.starts_with("git@") 
-        || args.source.starts_with("ssh://")
-    {
-        // Clone the repository
-        let temp_dir = args.temp_dir.clone().unwrap_or_else(|| {
-            std::env::temp_dir().join("git2pdf")
-        });
-        fs::create_dir_all(&temp_dir)?;
-        
+        || args.source.starts_with("ssh://");
+
+    // Setup temp directory
+    let temp_dir = args.temp_dir.clone().unwrap_or_else(|| {
+        std::env::temp_dir().join("git2pdf")
+    });
+    fs::create_dir_all(&temp_dir)?;
+
+    // Get source path (clone if remote, use directly if local)
+    let source_path = if is_remote {
         let repo_name = extract_repo_name(&args.source)?;
         let clone_path = temp_dir.join(&repo_name);
         
         if args.verbose {
-            println!("Cloning to: {}", clone_path.display());
+            println!("[{:?}] Cloning to: {}", start.elapsed(), clone_path.display());
         }
         
         clone_or_open_repo(&args.source, &clone_path, args.verbose)?;
+        
+        // Checkout the specified ref if provided
+        if let Some(ref git_ref) = args.r#ref {
+            if args.verbose {
+                println!("[{:?}] Checking out: {}", start.elapsed(), git_ref);
+            }
+            checkout_ref(&clone_path, git_ref, args.verbose)?;
+        }
+        
         clone_path
     } else {
-        // Use local path
-        PathBuf::from(&args.source)
+        let local_path = PathBuf::from(&args.source);
+        if !local_path.exists() {
+            bail!("Repository path does not exist: {}", local_path.display());
+        }
+        
+        // Checkout the specified ref if provided (for local repos)
+        if let Some(ref git_ref) = args.r#ref {
+            if args.verbose {
+                println!("[{:?}] Checking out: {}", start.elapsed(), git_ref);
+            }
+            checkout_ref(&local_path, git_ref, args.verbose)?;
+        }
+        
+        local_path
     };
 
-    if !repo_path.exists() {
-        bail!("Repository path does not exist: {}", repo_path.display());
-    }
-
-    // Checkout the specified ref if provided
-    if let Some(ref git_ref) = args.r#ref {
+    // Copy files to work directory (respecting .gitignore)
+    // For remote repos, we already have them in temp_dir, so just use that
+    // For local repos, copy to temp to avoid modifying original
+    let work_dir = if is_remote {
+        source_path.clone()
+    } else {
+        let repo_name = source_path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "repo".to_string());
+        let work_path = temp_dir.join(format!("{}-work", repo_name));
+        
         if args.verbose {
-            println!("Checking out: {}", git_ref);
+            println!("[{:?}] Copying files to work directory: {}", start.elapsed(), work_path.display());
         }
-        checkout_ref(&repo_path, git_ref, args.verbose)?;
+        
+        copy_repo_files(&source_path, &work_path, args.verbose)?;
+        work_path
+    };
+
+    // Run cargo fmt on work directory (unless disabled)
+    if !args.no_fmt {
+        if args.verbose {
+            println!("[{:?}] Running cargo fmt with line width {}...", start.elapsed(), args.line_width);
+        }
+        run_cargo_fmt(&work_dir, args.line_width, args.verbose)?;
     }
 
     // Discover crates in the repository
     if args.verbose {
-        println!("Discovering crates...");
+        println!("[{:?}] Discovering crates...", start.elapsed());
     }
-    let crates = discover_crates(&repo_path)?;
+    let crates = discover_crates(&work_dir)?;
     
     if crates.is_empty() {
         bail!("No Rust crates found in repository");
     }
 
     if args.verbose {
-        println!("Found {} crate(s):", crates.len());
+        println!("[{:?}] Found {} crate(s):", start.elapsed(), crates.len());
         for c in &crates {
             println!("  - {} ({})", c.name, c.path.display());
         }
@@ -197,6 +251,9 @@ fn main() -> Result<()> {
     fs::create_dir_all(&args.output)?;
 
     // Load syntax highlighting (None if theme is "none")
+    if args.verbose {
+        println!("[{:?}] Loading syntax highlighting...", start.elapsed());
+    }
     let syntax_set = SyntaxSet::load_defaults_newlines();
     let theme_set = ThemeSet::load_defaults();
     let theme: Option<&Theme> = if args.theme.to_lowercase() == "none" {
@@ -210,7 +267,7 @@ fn main() -> Result<()> {
     // Process each crate
     for crate_info in crates_to_process {
         if args.verbose {
-            println!("\nProcessing crate: {}", crate_info.name);
+            println!("\n[{:?}] Processing crate: {}", start.elapsed(), crate_info.name);
         }
 
         // Classify files
@@ -250,13 +307,22 @@ fn main() -> Result<()> {
             margin_right: Some(margin_right),
             margin_bottom: Some(margin_bottom),
             margin_left: Some(margin_left),
-            show_page_numbers: Some(true),
-            header_text: Some(format!("{} - Code Review", crate_info.name)),
+            show_page_numbers: Some(false),
             ..Default::default()
         };
 
         let images = BTreeMap::new();
-        let fonts = BTreeMap::new();
+        
+        // Load custom font or use embedded RobotoMono-Bold
+        let mut fonts: BTreeMap<String, Base64OrRaw> = BTreeMap::new();
+        let font_bytes: Vec<u8> = if let Some(ref font_path) = args.font {
+            fs::read(font_path)
+                .with_context(|| format!("Failed to read font file: {}", font_path.display()))?
+        } else {
+            include_bytes!("../fonts/RobotoMono-Bold.ttf").to_vec()
+        };
+        fonts.insert("RobotoMono".to_string(), Base64OrRaw::Raw(font_bytes));
+        
         let mut warnings = Vec::new();
 
         let doc = PdfDocument::from_html(&html, &images, &fonts, &options, &mut warnings)
@@ -305,4 +371,86 @@ fn extract_repo_name(url: &str) -> Result<String> {
     }
     
     bail!("Could not extract repository name from URL: {}", url)
+}
+
+/// Run cargo fmt on a repository with specified line width
+fn run_cargo_fmt(repo_path: &Path, line_width: u32, verbose: bool) -> Result<()> {
+    // Create a rustfmt.toml with the specified line width
+    let rustfmt_config = format!("max_width = {}\n", line_width);
+    let rustfmt_path = repo_path.join("rustfmt.toml");
+    
+    // Only write if it doesn't exist (don't override existing config)
+    if !rustfmt_path.exists() {
+        fs::write(&rustfmt_path, &rustfmt_config)?;
+    }
+    
+    let output = Command::new("cargo")
+        .arg("fmt")
+        .current_dir(repo_path)
+        .output()
+        .context("Failed to run cargo fmt. Is cargo installed?")?;
+    
+    if verbose {
+        if !output.stdout.is_empty() {
+            println!("  cargo fmt stdout: {}", String::from_utf8_lossy(&output.stdout));
+        }
+        if !output.stderr.is_empty() {
+            println!("  cargo fmt stderr: {}", String::from_utf8_lossy(&output.stderr));
+        }
+    }
+    
+    // Don't fail if cargo fmt fails (repo might not be a valid Rust project)
+    if !output.status.success() && verbose {
+        println!("  Warning: cargo fmt exited with non-zero status");
+    }
+    
+    Ok(())
+}
+
+/// Copy repository files to destination, respecting .gitignore
+fn copy_repo_files(src: &Path, dst: &Path, verbose: bool) -> Result<()> {
+    // Remove destination if it exists
+    if dst.exists() {
+        fs::remove_dir_all(dst)?;
+    }
+    fs::create_dir_all(dst)?;
+    
+    // Use ignore crate to walk files respecting .gitignore
+    let walker = WalkBuilder::new(src)
+        .hidden(false)           // Include hidden files (like .gitignore itself)
+        .git_ignore(true)        // Respect .gitignore
+        .git_global(true)        // Respect global gitignore
+        .git_exclude(true)       // Respect .git/info/exclude
+        .build();
+    
+    let mut file_count = 0;
+    for entry in walker {
+        let entry = entry?;
+        let path = entry.path();
+        
+        // Skip the .git directory
+        if path.components().any(|c| c.as_os_str() == ".git") {
+            continue;
+        }
+        
+        // Get relative path
+        let rel_path = path.strip_prefix(src).unwrap_or(path);
+        let dst_path = dst.join(rel_path);
+        
+        if path.is_dir() {
+            fs::create_dir_all(&dst_path)?;
+        } else if path.is_file() {
+            if let Some(parent) = dst_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(path, &dst_path)?;
+            file_count += 1;
+        }
+    }
+    
+    if verbose {
+        println!("  Copied {} files", file_count);
+    }
+    
+    Ok(())
 }

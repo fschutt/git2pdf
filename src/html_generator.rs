@@ -62,7 +62,7 @@ fn generate_html_header(crate_info: &CrateInfo, font_size: f32, columns: u32, th
     <style>
         @page {{
             size: A4;
-            margin: 10mm;
+            margin: 5mm;
         }}
         
         * {{
@@ -70,9 +70,9 @@ fn generate_html_header(crate_info: &CrateInfo, font_size: f32, columns: u32, th
         }}
         
         body {{
-            font-family: 'Fira Code', 'Source Code Pro', 'Consolas', 'Monaco', monospace;
+            font-family: 'RobotoMono', 'Fira Code', 'Source Code Pro', 'Consolas', 'Monaco', monospace;
             font-size: {font_size}pt;
-            line-height: 1.3;
+            line-height: 1.2;
             margin: 0;
             padding: 0;
             background-color: {bg_color};
@@ -81,43 +81,36 @@ fn generate_html_header(crate_info: &CrateInfo, font_size: f32, columns: u32, th
         
         .content {{
             column-count: {columns};
-            column-gap: 15px;
+            column-gap: 10px;
             column-rule: 1px solid #ddd;
-            padding: 10px;
+            padding: 5px;
         }}
         
         .file-section {{
             break-inside: avoid-column;
-            margin-bottom: 20px;
+            margin-bottom: 10px;
             page-break-inside: avoid;
         }}
         
         .file-header {{
-            background-color: #f0f0f0;
+            background-color: #e8e8e8;
             color: #333;
-            padding: 5px 10px;
+            padding: 3px 8px;
             font-weight: bold;
             font-size: {header_size}pt;
-            border-bottom: 2px solid #666;
-            margin-bottom: 5px;
+            border-bottom: 1px solid #999;
+            margin-bottom: 3px;
             break-after: avoid;
-        }}
-        
-        .file-path {{
-            font-size: {path_size}pt;
-            color: #666;
-            font-weight: normal;
-            margin-left: 10px;
         }}
         
         .code-block {{
             margin: 0;
-            padding: 5px;
+            padding: 3px;
             overflow-x: hidden;
             white-space: pre-wrap;
             word-wrap: break-word;
             font-size: {font_size}pt;
-            line-height: 1.2;
+            line-height: 1.15;
         }}
         
         .line {{
@@ -184,9 +177,8 @@ fn generate_html_header(crate_info: &CrateInfo, font_size: f32, columns: u32, th
             .unwrap_or_default(),
         file_count = 0, // Will be updated
         font_size = font_size,
-        header_size = font_size + 2.0,
-        path_size = font_size - 1.0,
-        line_num_size = font_size - 1.0,
+        header_size = font_size + 1.0,
+        line_num_size = font_size - 0.5,
         columns = columns,
         bg_color = bg_color,
         fg_color = fg_color,
@@ -204,15 +196,11 @@ fn generate_html_for_file(
     
     let mut html = String::new();
     
-    // File section
+    // File section - show relative path from crate root
     html.push_str(&format!(
         r#"<div class="file-section">
-    <div class="file-header">
-        {}
-        <span class="file-path">{}</span>
-    </div>
+    <div class="file-header">{}</div>
     <pre class="code-block">"#,
-        html_escape(&file.module_path),
         html_escape(&file.relative_path.to_string_lossy()),
     ));
     

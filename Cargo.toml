@@ -9,13 +9,11 @@ keywords = ["git", "pdf", "code-review", "rust"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
-# Git operations using gitoxide
+# Git operations using gitoxide (pure Rust, no C dependencies)
 gix = { version = "0.72", default-features = false, features = [
     "blocking-network-client",
     "blocking-http-transport-reqwest-rust-tls",
     "worktree-mutation",
-    "excludes",
-    "attributes",
 ] }
 
 # CLI argument parsing
