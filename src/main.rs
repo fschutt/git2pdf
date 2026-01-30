@@ -360,7 +360,6 @@ fn main() -> Result<()> {
         let save_options = PdfSaveOptions::default();
         let mut save_warnings = Vec::new();
         let bytes = doc.save(&save_options, &mut save_warnings);
-
         fs::write(&output_path, bytes)?;
         println!("Created: {}", output_path.display());
     }

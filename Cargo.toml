@@ -21,7 +21,8 @@ clap = { version = "4", features = ["derive"] }
 
 # PDF generation with HTML support
 # Use local path for development - change to git for release
-printpdf = { path = "../printpdf", features = ["html"] }
+# html_multithreaded enables parallel font loading for faster startup
+printpdf = { path = "../printpdf", features = ["html_multithreaded"] }
 
 # Syntax highlighting
 syntect = "5"
