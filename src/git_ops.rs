@@ -155,3 +155,18 @@ pub fn checkout_default_branch(repo_path: &Path, verbose: bool) -> Result<String
     // Use HEAD
     Ok("HEAD".to_string())
 }
+
+/// Get the current HEAD commit hash (short form)
+pub fn get_git_hash(repo_path: &Path) -> Result<String> {
+    let repo = gix::open(repo_path)
+        .context("Failed to open repository")?;
+    
+    let head = repo.head()
+        .context("Failed to get HEAD")?;
+    
+    let commit_id = head.id()
+        .context("HEAD has no commit id (empty repository?)")?;
+    
+    // Return first 8 characters of the hash
+    Ok(commit_id.to_string().chars().take(8).collect())
+}

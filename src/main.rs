@@ -8,12 +8,14 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use ignore::WalkBuilder;
 use printpdf::{Base64OrRaw, GeneratePdfOptions, PdfDocument, PdfSaveOptions};
+use rayon::prelude::*;
 use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
@@ -24,8 +26,8 @@ mod html_generator;
 
 use crate_discovery::{CrateInfo, discover_crates};
 use file_classifier::{classify_files, SourceFile, FileCategory};
-use git_ops::{clone_or_open_repo, checkout_ref};
-use html_generator::generate_html_for_crate;
+use git_ops::{clone_or_open_repo, checkout_ref, get_git_hash};
+use html_generator::{generate_html_for_single_file, generate_title_page_html};
 
 /// git2pdf - Print git repositories to PDF for code review
 #[derive(Parser, Debug)]
@@ -254,18 +256,36 @@ fn main() -> Result<()> {
     // Create output directory
     fs::create_dir_all(&args.output)?;
 
-    // Load syntax highlighting (None if theme is "none")
+    // Load syntax highlighting
     if args.verbose {
         println!("[{:?}] Loading syntax highlighting...", start.elapsed());
     }
-    let syntax_set = SyntaxSet::load_defaults_newlines();
-    let theme_set = ThemeSet::load_defaults();
-    let theme: Option<&Theme> = if args.theme.to_lowercase() == "none" {
-        None
+
+    // Get git hash for title pages
+    let git_hash = get_git_hash(&work_dir).ok();
+
+    // Load font bytes once (shared across all parallel tasks)
+    let font_bytes: Arc<Vec<u8>> = Arc::new(if let Some(ref font_path) = args.font {
+        fs::read(font_path)
+            .with_context(|| format!("Failed to read font file: {}", font_path.display()))?
     } else {
-        Some(theme_set.themes.get(&args.theme)
-            .or_else(|| theme_set.themes.get("InspiredGitHub"))
-            .context("Failed to load syntax theme")?)
+        include_bytes!("../fonts/RobotoMono-Bold.ttf").to_vec()
+    });
+
+    // Wrap syntax_set and theme_set in Arc for sharing across threads
+    let syntax_set = Arc::new(SyntaxSet::load_defaults_newlines());
+    let theme_set = Arc::new(ThemeSet::load_defaults());
+
+    // PDF generation options (shared)
+    let pdf_options = GeneratePdfOptions {
+        page_width: Some(paper_width),
+        page_height: Some(paper_height),
+        margin_top: Some(margin_top),
+        margin_right: Some(margin_right),
+        margin_bottom: Some(margin_bottom),
+        margin_left: Some(margin_left),
+        show_page_numbers: Some(false),
+        ..Default::default()
     };
 
     // Process each crate
@@ -277,7 +297,7 @@ fn main() -> Result<()> {
         // Classify files
         let files = classify_files(&crate_info.path, args.include_tests)?;
         
-        let source_files: Vec<&SourceFile> = files.iter()
+        let source_files: Vec<SourceFile> = files.into_iter()
             .filter(|f| f.category == FileCategory::Source || 
                        (args.include_tests && matches!(f.category, FileCategory::Test | FileCategory::IntegrationTest)))
             .collect();
@@ -290,81 +310,90 @@ fn main() -> Result<()> {
         }
 
         if args.verbose {
-            println!("  Found {} source file(s)", source_files.len());
+            println!("  Found {} source file(s), processing in parallel...", source_files.len());
         }
 
-        // Generate HTML
-        let html = generate_html_for_crate(
-            crate_info,
-            &source_files,
-            &syntax_set,
-            theme,
-            args.font_size,
-            args.columns,
-            args.page_break,
-        )?;
-
-        // Always save HTML for debugging
-        let html_path = args.output.join(format!("{}.html", crate_info.name));
-        fs::write(&html_path, &html)?;
-        println!("  Saved HTML: {}", html_path.display());
-
-        // Generate PDF
-        let options = GeneratePdfOptions {
-            page_width: Some(paper_width),
-            page_height: Some(paper_height),
-            margin_top: Some(margin_top),
-            margin_right: Some(margin_right),
-            margin_bottom: Some(margin_bottom),
-            margin_left: Some(margin_left),
-            show_page_numbers: Some(false),
-            ..Default::default()
-        };
-
-        let images = BTreeMap::new();
+        // Generate title page first
+        let title_html = generate_title_page_html(crate_info, git_hash.as_deref(), args.font_size);
         
-        // Load custom font or use embedded RobotoMono-Bold
+        // Create fonts map for PDF generation
         let mut fonts: BTreeMap<String, Base64OrRaw> = BTreeMap::new();
-        let font_bytes: Vec<u8> = if let Some(ref font_path) = args.font {
-            fs::read(font_path)
-                .with_context(|| format!("Failed to read font file: {}", font_path.display()))?
-        } else {
-            include_bytes!("../fonts/RobotoMono-Bold.ttf").to_vec()
-        };
-        fonts.insert("RobotoMono".to_string(), Base64OrRaw::Raw(font_bytes));
+        fonts.insert("RobotoMono".to_string(), Base64OrRaw::Raw((*font_bytes).clone()));
         
-        let mut warnings = Vec::new();
+        let mut title_warnings = Vec::new();
+        let mut title_doc = PdfDocument::from_html(&title_html, &BTreeMap::new(), &fonts, &pdf_options, &mut title_warnings)
+            .map_err(|e| anyhow::anyhow!("Failed to generate title page: {}", e))?;
 
-        // Use debug version to get display list and PDF ops info
-        let (doc, debug_info) = PdfDocument::from_html_debug(&html, &images, &fonts, &options, &mut warnings)
-            .map_err(|e| anyhow::anyhow!("Failed to generate PDF: {}", e))?;
-
-        // Save debug info to files
-        for (idx, dl_debug) in debug_info.display_list_debug.iter().enumerate() {
-            let debug_path = args.output.join(format!("{}_page{}_displaylist.txt", crate_info.name, idx + 1));
-            fs::write(&debug_path, dl_debug)?;
-            println!("  Saved display list debug: {}", debug_path.display());
-        }
-        for (idx, ops_debug) in debug_info.pdf_ops_debug.iter().enumerate() {
-            let debug_path = args.output.join(format!("{}_page{}_pdfops.txt", crate_info.name, idx + 1));
-            fs::write(&debug_path, ops_debug)?;
-            println!("  Saved PDF ops debug: {}", debug_path.display());
+        if args.verbose {
+            println!("  Generated title page ({} page(s))", title_doc.page_count());
         }
 
-        if args.verbose && !warnings.is_empty() {
-            println!("  PDF generation warnings: {}", warnings.len());
+        // Process each source file in parallel
+        let theme_name = args.theme.clone();
+        let font_size = args.font_size;
+        let pdf_opts = pdf_options.clone();
+        let font_bytes_clone = Arc::clone(&font_bytes);
+        let syntax_set_clone = Arc::clone(&syntax_set);
+        let theme_set_clone = Arc::clone(&theme_set);
+
+        let file_pdfs: Vec<Result<(String, PdfDocument)>> = source_files
+            .par_iter()
+            .map(|file| {
+                // Get theme reference for this thread
+                let theme: Option<&Theme> = if theme_name.to_lowercase() == "none" {
+                    None
+                } else {
+                    theme_set_clone.themes.get(&theme_name)
+                        .or_else(|| theme_set_clone.themes.get("InspiredGitHub"))
+                };
+
+                // Generate HTML for this file
+                let html = generate_html_for_single_file(file, &syntax_set_clone, theme, font_size)?;
+                
+                // Create fonts map
+                let mut fonts: BTreeMap<String, Base64OrRaw> = BTreeMap::new();
+                fonts.insert("RobotoMono".to_string(), Base64OrRaw::Raw((*font_bytes_clone).clone()));
+                
+                // Generate PDF
+                let mut warnings = Vec::new();
+                let doc = PdfDocument::from_html(&html, &BTreeMap::new(), &fonts, &pdf_opts, &mut warnings)
+                    .map_err(|e| anyhow::anyhow!("Failed to generate PDF for {}: {}", file.relative_path.display(), e))?;
+                
+                Ok((file.relative_path.to_string_lossy().to_string(), doc))
+            })
+            .collect();
+
+        // Combine all file PDFs into the main document
+        let mut file_count = 0;
+        for result in file_pdfs {
+            match result {
+                Ok((path, doc)) => {
+                    title_doc.append_document(doc);
+                    file_count += 1;
+                    if args.verbose {
+                        println!("  Added: {} ({} pages total)", path, title_doc.page_count());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  Warning: {}", e);
+                }
+            }
+        }
+
+        if args.verbose {
+            println!("  Combined {} files into {} pages", file_count, title_doc.page_count());
         }
 
         // Save PDF
         let output_path = args.output.join(format!("{}.pdf", crate_info.name));
         let save_options = PdfSaveOptions::default();
         let mut save_warnings = Vec::new();
-        let bytes = doc.save(&save_options, &mut save_warnings);
+        let bytes = title_doc.save(&save_options, &mut save_warnings);
         fs::write(&output_path, bytes)?;
-        println!("Created: {}", output_path.display());
+        println!("Created: {} ({} pages)", output_path.display(), title_doc.page_count());
     }
 
-    println!("\nDone!");
+    println!("\nDone in {:?}!", start.elapsed());
     Ok(())
 }
 

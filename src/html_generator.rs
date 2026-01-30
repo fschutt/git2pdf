@@ -288,6 +288,224 @@ fn html_escape(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+/// Generate a minimal HTML document for a single file (no headers, for parallel processing)
+pub fn generate_html_for_single_file(
+    file: &SourceFile,
+    syntax_set: &SyntaxSet,
+    theme: Option<&Theme>,
+    font_size: f32,
+) -> Result<String> {
+    let content = fs::read_to_string(&file.path)
+        .with_context(|| format!("Failed to read file: {}", file.path.display()))?;
+    
+    let (bg_color, fg_color) = if let Some(t) = theme {
+        let bg = t.settings.background
+            .map(|c| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b))
+            .unwrap_or_else(|| "#ffffff".to_string());
+        let fg = t.settings.foreground
+            .map(|c| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b))
+            .unwrap_or_else(|| "#000000".to_string());
+        (bg, fg)
+    } else {
+        ("#ffffff".to_string(), "#000000".to_string())
+    };
+
+    let mut html = format!(r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>{path}</title>
+    <style>
+        * {{
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }}
+        
+        body {{
+            font-family: 'RobotoMono', monospace;
+            font-size: {font_size}pt;
+            line-height: 1.2;
+            background-color: {bg_color};
+            color: {fg_color};
+        }}
+        
+        .file-header {{
+            background-color: #e0e0e0;
+            color: #333;
+            padding: 2px 5px;
+            font-weight: bold;
+            font-size: {header_size}pt;
+            border-bottom: 1px solid #999;
+        }}
+        
+        .code-block {{
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-size: {font_size}pt;
+            font-family: 'RobotoMono', monospace;
+            line-height: 1.15;
+        }}
+        
+        .line {{
+            display: block;
+        }}
+        
+        .line-number {{
+            display: inline-block;
+            width: 2.5em;
+            text-align: right;
+            padding-right: 0.5em;
+            color: #888;
+            font-size: {line_num_size}pt;
+        }}
+        
+        .line-content {{
+            display: inline;
+        }}
+    </style>
+</head>
+<body>
+<div class="file-header">{path}</div>
+<pre class="code-block">"#,
+        path = html_escape(&file.relative_path.to_string_lossy()),
+        font_size = font_size,
+        header_size = font_size + 1.0,
+        line_num_size = font_size,
+        bg_color = bg_color,
+        fg_color = fg_color,
+    );
+    
+    // Highlight each line (or just escape if no theme)
+    if let Some(theme) = theme {
+        let syntax = syntax_set.find_syntax_by_extension("rs")
+            .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
+        
+        let mut highlighter = HighlightLines::new(syntax, theme);
+        
+        for (line_num, line) in LinesWithEndings::from(&content).enumerate() {
+            let highlighted = highlighter.highlight_line(line, syntax_set)
+                .unwrap_or_else(|_| vec![(Style::default(), line)]);
+            
+            html.push_str(&format!(
+                r#"<span class="line"><span class="line-number">{}</span><span class="line-content">"#,
+                line_num + 1
+            ));
+            
+            for (style, text) in highlighted {
+                let css = style_to_css(&style);
+                if css.is_empty() {
+                    html.push_str(&html_escape(text));
+                } else {
+                    html.push_str(&format!(
+                        r#"<span style="{}">{}</span>"#,
+                        css,
+                        html_escape(text)
+                    ));
+                }
+            }
+            
+            html.push_str("</span></span>\n");
+        }
+    } else {
+        for (line_num, line) in LinesWithEndings::from(&content).enumerate() {
+            html.push_str(&format!(
+                r#"<span class="line"><span class="line-number">{}</span><span class="line-content">{}</span></span>
+"#,
+                line_num + 1,
+                html_escape(line)
+            ));
+        }
+    }
+    
+    html.push_str("</pre>\n</body>\n</html>");
+    
+    Ok(html)
+}
+
+/// Generate a title page HTML for a crate
+pub fn generate_title_page_html(
+    crate_info: &CrateInfo,
+    git_hash: Option<&str>,
+    font_size: f32,
+) -> String {
+    format!(r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>{name} - Title</title>
+    <style>
+        * {{
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }}
+        
+        body {{
+            font-family: 'RobotoMono', monospace;
+            font-size: {font_size}pt;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background-color: #ffffff;
+            color: #333;
+        }}
+        
+        .title-container {{
+            text-align: center;
+            padding: 40px;
+        }}
+        
+        h1 {{
+            font-size: 36pt;
+            margin-bottom: 20px;
+            color: #222;
+        }}
+        
+        .version {{
+            font-size: 18pt;
+            color: #666;
+            margin-bottom: 10px;
+        }}
+        
+        .git-hash {{
+            font-size: 12pt;
+            color: #888;
+            font-family: 'RobotoMono', monospace;
+            margin-bottom: 20px;
+        }}
+        
+        .description {{
+            font-size: 14pt;
+            color: #555;
+            max-width: 600px;
+            line-height: 1.5;
+        }}
+    </style>
+</head>
+<body>
+    <div class="title-container">
+        <h1>{name}</h1>
+        <div class="version">Version {version}</div>
+        {git_hash_html}
+        {description_html}
+    </div>
+</body>
+</html>"#,
+        name = html_escape(&crate_info.name),
+        version = html_escape(&crate_info.version),
+        git_hash_html = git_hash
+            .map(|h| format!(r#"<div class="git-hash">Commit: {}</div>"#, html_escape(h)))
+            .unwrap_or_default(),
+        description_html = crate_info.description.as_ref()
+            .map(|d| format!(r#"<div class="description">{}</div>"#, html_escape(d)))
+            .unwrap_or_default(),
+        font_size = font_size,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
