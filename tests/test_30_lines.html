@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Test - 30 Lines</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: 'RobotoMono', monospace;
+            font-size: 8pt;
+            line-height: 1.2;
+            background-color: #282c34;
+            color: #abb2bf;
+        }
+        
+        .file-header {
+            background-color: #e0e0e0;
+            color: #333;
+            padding: 2px 5px;
+            font-weight: bold;
+            font-size: 9pt;
+            border-bottom: 1px solid #999;
+        }
+        
+        .code-block {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-size: 8pt;
+            font-family: 'RobotoMono', monospace;
+            line-height: 1.15;
+        }
+        
+        .line {
+            display: block;
+        }
+        
+        .line-number {
+            display: inline-block;
+            width: 2.5em;
+            text-align: right;
+            padding-right: 0.5em;
+            color: #888;
+            font-size: 8pt;
+        }
+        
+        .line-content {
+            display: inline;
+        }
+
+        h1 {
+            font-size: 18pt;
+            padding: 8px;
+            background-color: #333;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <h1>Test File</h1>
+    <div class="file-section">
+        <div class="file-header">src/crate_discovery.rs</div>
+        <pre class="code-block"><span class="line"><span class="line-number">1</span><span class="line-content">//! Rust crate discovery in a repository</span></span>
+<span class="line"><span class="line-number">2</span><span class="line-content"></span></span>
+<span class="line"><span class="line-number">3</span><span class="line-content">use std::fs;</span></span>
+<span class="line"><span class="line-number">4</span><span class="line-content">use std::path::{Path, PathBuf};</span></span>
+<span class="line"><span class="line-number">5</span><span class="line-content"></span></span>
+<span class="line"><span class="line-number">6</span><span class="line-content">use anyhow::{Context, Result};</span></span>
+<span class="line"><span class="line-number">7</span><span class="line-content">use serde::Deserialize;</span></span>
+<span class="line"><span class="line-number">8</span><span class="line-content"></span></span>
+<span class="line"><span class="line-number">9</span><span class="line-content">/// Information about a discovered Rust crate</span></span>
+<span class="line"><span class="line-number">10</span><span class="line-content">#[derive(Debug, Clone)]</span></span>
+<span class="line"><span class="line-number">11</span><span class="line-content">pub struct CrateInfo {</span></span>
+<span class="line"><span class="line-number">12</span><span class="line-content">&#160;&#160;&#160;&#160;/// Crate name from Cargo.toml</span></span>
+<span class="line"><span class="line-number">13</span><span class="line-content">&#160;&#160;&#160;&#160;pub name: String,</span></span>
+<span class="line"><span class="line-number">14</span><span class="line-content">&#160;&#160;&#160;&#160;/// Path to the crate root (directory containing Cargo.toml)</span></span>
+<span class="line"><span class="line-number">15</span><span class="line-content">&#160;&#160;&#160;&#160;pub path: PathBuf,</span></span>
+<span class="line"><span class="line-number">16</span><span class="line-content">&#160;&#160;&#160;&#160;/// Whether this is a workspace member</span></span>
+<span class="line"><span class="line-number">17</span><span class="line-content">&#160;&#160;&#160;&#160;pub is_workspace_member: bool,</span></span>
+<span class="line"><span class="line-number">18</span><span class="line-content">&#160;&#160;&#160;&#160;/// Crate version</span></span>
+<span class="line"><span class="line-number">19</span><span class="line-content">&#160;&#160;&#160;&#160;pub version: String,</span></span>
+<span class="line"><span class="line-number">20</span><span class="line-content">&#160;&#160;&#160;&#160;/// Crate description</span></span>
+<span class="line"><span class="line-number">21</span><span class="line-content">&#160;&#160;&#160;&#160;pub description: Option&lt;String&gt;,</span></span>
+<span class="line"><span class="line-number">22</span><span class="line-content">}</span></span>
+<span class="line"><span class="line-number">23</span><span class="line-content"></span></span>
+<span class="line"><span class="line-number">24</span><span class="line-content">/// Minimal Cargo.toml structure for parsing</span></span>
+<span class="line"><span class="line-number">25</span><span class="line-content">#[derive(Debug, Deserialize)]</span></span>
+<span class="line"><span class="line-number">26</span><span class="line-content">struct CargoToml {</span></span>
+<span class="line"><span class="line-number">27</span><span class="line-content">&#160;&#160;&#160;&#160;package: Option&lt;Package&gt;,</span></span>
+<span class="line"><span class="line-number">28</span><span class="line-content">&#160;&#160;&#160;&#160;workspace: Option&lt;Workspace&gt;,</span></span>
+<span class="line"><span class="line-number">29</span><span class="line-content">}</span></span>
+<span class="line"><span class="line-number">30</span><span class="line-content"></span></span>
+</pre>
+    </div>
+</body>
+</html>
