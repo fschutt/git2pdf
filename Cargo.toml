@@ -20,7 +20,8 @@ gix = { version = "0.72", default-features = false, features = [
 clap = { version = "4", features = ["derive"] }
 
 # PDF generation with HTML support
-printpdf = { git = "https://github.com/fschutt/printpdf", rev = "d0fa42212b77926cbcdd0304399205e58654b664", features = ["html"] }
+# Use local path for development - change to git for release
+printpdf = { path = "../printpdf", features = ["html"] }
 
 # Syntax highlighting
 syntect = "5"

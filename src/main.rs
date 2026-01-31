@@ -304,12 +304,10 @@ fn main() -> Result<()> {
             args.page_break,
         )?;
 
-        // Optionally save HTML for debugging
-        if args.verbose {
-            let html_path = args.output.join(format!("{}.html", crate_info.name));
-            fs::write(&html_path, &html)?;
-            println!("  Saved HTML: {}", html_path.display());
-        }
+        // Always save HTML for debugging
+        let html_path = args.output.join(format!("{}.html", crate_info.name));
+        fs::write(&html_path, &html)?;
+        println!("  Saved HTML: {}", html_path.display());
 
         // Generate PDF
         let options = GeneratePdfOptions {
@@ -337,8 +335,21 @@ fn main() -> Result<()> {
         
         let mut warnings = Vec::new();
 
-        let doc = PdfDocument::from_html(&html, &images, &fonts, &options, &mut warnings)
+        // Use debug version to get display list and PDF ops info
+        let (doc, debug_info) = PdfDocument::from_html_debug(&html, &images, &fonts, &options, &mut warnings)
             .map_err(|e| anyhow::anyhow!("Failed to generate PDF: {}", e))?;
+
+        // Save debug info to files
+        for (idx, dl_debug) in debug_info.display_list_debug.iter().enumerate() {
+            let debug_path = args.output.join(format!("{}_page{}_displaylist.txt", crate_info.name, idx + 1));
+            fs::write(&debug_path, dl_debug)?;
+            println!("  Saved display list debug: {}", debug_path.display());
+        }
+        for (idx, ops_debug) in debug_info.pdf_ops_debug.iter().enumerate() {
+            let debug_path = args.output.join(format!("{}_page{}_pdfops.txt", crate_info.name, idx + 1));
+            fs::write(&debug_path, ops_debug)?;
+            println!("  Saved PDF ops debug: {}", debug_path.display());
+        }
 
         if args.verbose && !warnings.is_empty() {
             println!("  PDF generation warnings: {}", warnings.len());
