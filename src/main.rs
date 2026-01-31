@@ -131,7 +131,7 @@ fn parse_margins(s: &str) -> Result<(f32, f32, f32, f32)> {
 fn main() -> Result<()> {
     let args = Args::parse();
     let start = Instant::now();
-
+    
     // Parse paper size
     let (paper_width, paper_height) = parse_paper_size(&args.paper_size)?;
     
