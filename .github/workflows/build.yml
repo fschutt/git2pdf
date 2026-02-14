@@ -28,10 +28,10 @@ jobs:
     - uses: actions/checkout@v4
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-action@stable
+      uses: dtolnay/rust-toolchain@stable
       with:
         toolchain: ${{ matrix.rust }}
-        target: ${{ matrix.target }}
+        targets: ${{ matrix.target }}
 
     - name: Install system dependencies (Linux)
       if: matrix.os == 'ubuntu-latest'
@@ -52,31 +52,28 @@ jobs:
 
     - name: Build
       run: cargo build --release
-      working-directory: git2pdf
 
     - name: Run tests
       run: cargo test --release
-      working-directory: git2pdf
 
     - name: Test on itself
       run: |
         cargo run --release -- . --output ./output --verbose
-      working-directory: git2pdf
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
         name: git2pdf-${{ matrix.target }}
         path: |
-          git2pdf/target/release/git2pdf
-          git2pdf/target/release/git2pdf.exe
+          target/release/git2pdf
+          target/release/git2pdf.exe
         if-no-files-found: ignore
 
     - name: Upload generated PDFs
       uses: actions/upload-artifact@v4
       with:
         name: generated-pdfs-${{ matrix.target }}
-        path: git2pdf/output/*.pdf
+        path: output/*.pdf
         if-no-files-found: ignore
 
   release:
