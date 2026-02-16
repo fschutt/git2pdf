@@ -5,6 +5,8 @@
 use std::fs;
 
 use anyhow::{Context, Result};
+use std::collections::HashMap;
+
 use syntect::highlighting::{Theme, Style, FontStyle};
 use syntect::parsing::SyntaxSet;
 use syntect::easy::HighlightLines;
@@ -184,7 +186,82 @@ fn generate_html_header(crate_info: &CrateInfo, font_size: f32, columns: u32, th
     )
 }
 
-/// Generate HTML for a single source file
+/// Collect syntax highlighting spans and unique CSS classes for a file's content.
+/// Returns (all_lines, style_to_class) where all_lines has the highlighted spans
+/// and style_to_class maps StyleKey -> CSS class name.
+fn collect_highlight_spans(
+    content: &str,
+    syntax_set: &SyntaxSet,
+    theme: &Theme,
+) -> (Vec<Vec<(Style, String)>>, HashMap<StyleKey, String>) {
+    let syntax = syntax_set.find_syntax_by_extension("rs")
+        .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
+    let mut highlighter = HighlightLines::new(syntax, theme);
+    let mut all_lines: Vec<Vec<(Style, String)>> = Vec::new();
+    let mut style_to_class: HashMap<StyleKey, String> = HashMap::new();
+    let mut class_counter = 0usize;
+
+    for line in LinesWithEndings::from(content) {
+        let highlighted = highlighter.highlight_line(line, syntax_set)
+            .unwrap_or_else(|_| vec![(Style::default(), line)]);
+        let mut line_spans = Vec::new();
+        for (style, text) in highlighted {
+            let key = StyleKey::from_style(&style);
+            if !key.is_default() && !style_to_class.contains_key(&key) {
+                class_counter += 1;
+                style_to_class.insert(key, format!("c{}", class_counter));
+            }
+            line_spans.push((style, text.to_string()));
+        }
+        all_lines.push(line_spans);
+    }
+    (all_lines, style_to_class)
+}
+
+/// Write highlighted lines as HTML spans using CSS classes.
+fn write_highlighted_lines(
+    html: &mut String,
+    all_lines: &[Vec<(Style, String)>],
+    style_to_class: &HashMap<StyleKey, String>,
+) {
+    for (line_num, line_spans) in all_lines.iter().enumerate() {
+        html.push_str(&format!(
+            r#"<span class="line"><span class="line-number">{}</span><span class="line-content">"#,
+            line_num + 1
+        ));
+        for (style, text) in line_spans {
+            let key = StyleKey::from_style(style);
+            if key.is_default() {
+                html.push_str(&html_escape(text));
+            } else if let Some(class_name) = style_to_class.get(&key) {
+                html.push_str(&format!(
+                    r#"<span class="{}">{}</span>"#,
+                    class_name,
+                    html_escape(text)
+                ));
+            } else {
+                html.push_str(&html_escape(text));
+            }
+        }
+        html.push_str("</span></span>\n");
+    }
+}
+
+/// Generate CSS class definitions string from style_to_class map.
+fn generate_css_classes(style_to_class: &HashMap<StyleKey, String>) -> String {
+    if style_to_class.is_empty() {
+        return String::new();
+    }
+    let mut css = String::new();
+    let mut sorted: Vec<(&StyleKey, &String)> = style_to_class.iter().collect();
+    sorted.sort_by_key(|(_, name)| name.to_string());
+    for (key, class_name) in &sorted {
+        css.push_str(&format!("        .{} {{ {} }}\n", class_name, key.to_css()));
+    }
+    css
+}
+
+/// Generate HTML for a single source file (used inside generate_html_for_crate)
 fn generate_html_for_file(
     file: &SourceFile,
     syntax_set: &SyntaxSet,
@@ -204,42 +281,13 @@ fn generate_html_for_file(
         html_escape(&file.relative_path.to_string_lossy()),
     ));
     
-    // Highlight each line (or just escape if no theme)
     if let Some(theme) = theme {
-        // Get syntax for Rust
-        let syntax = syntax_set.find_syntax_by_extension("rs")
-            .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
-        
-        let mut highlighter = HighlightLines::new(syntax, theme);
-        
-        for (line_num, line) in LinesWithEndings::from(&content).enumerate() {
-            let highlighted = highlighter.highlight_line(line, syntax_set)
-                .unwrap_or_else(|_| vec![(Style::default(), line)]);
-            
-            html.push_str(&format!(
-                r#"<span class="line"><span class="line-number">{}</span><span class="line-content">"#,
-                line_num + 1
-            ));
-            
-            for (style, text) in highlighted {
-                let css = style_to_css(&style);
-                if css.is_empty() {
-                    html.push_str(&html_escape(text));
-                } else {
-                    html.push_str(&format!(
-                        r#"<span style="{}">{}</span>"#,
-                        css,
-                        html_escape(text)
-                    ));
-                }
-            }
-            
-            // Close the line content and line spans, then add a newline
-            // The newline is important for the PDF layout engine to recognize line breaks
-            html.push_str("</span></span>\n");
-        }
+        let (all_lines, style_to_class) = collect_highlight_spans(&content, syntax_set, theme);
+        // NOTE: CSS classes for this file won't be in the <head> <style> block.
+        // For the crate-mode HTML, we'd need to pre-collect all classes.
+        // For now this path uses inline styles as fallback.
+        write_highlighted_lines(&mut html, &all_lines, &style_to_class);
     } else {
-        // No syntax highlighting - just plain text with line numbers
         for (line_num, line) in LinesWithEndings::from(&content).enumerate() {
             html.push_str(&format!(
                 r#"<span class="line"><span class="line-number">{}</span><span class="line-content">{}</span></span>
@@ -279,6 +327,53 @@ fn style_to_css(style: &Style) -> String {
     css_parts.join("; ")
 }
 
+/// A hashable key for a syntect Style (color + font-style)
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct StyleKey {
+    fg_r: u8,
+    fg_g: u8,
+    fg_b: u8,
+    fg_a: u8,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+}
+
+impl StyleKey {
+    fn from_style(style: &Style) -> Self {
+        Self {
+            fg_r: style.foreground.r,
+            fg_g: style.foreground.g,
+            fg_b: style.foreground.b,
+            fg_a: style.foreground.a,
+            bold: style.font_style.contains(FontStyle::BOLD),
+            italic: style.font_style.contains(FontStyle::ITALIC),
+            underline: style.font_style.contains(FontStyle::UNDERLINE),
+        }
+    }
+    
+    fn is_default(&self) -> bool {
+        self.fg_a == 0 && !self.bold && !self.italic && !self.underline
+    }
+    
+    fn to_css(&self) -> String {
+        let mut parts = Vec::new();
+        if self.fg_a > 0 {
+            parts.push(format!("color: #{:02x}{:02x}{:02x}", self.fg_r, self.fg_g, self.fg_b));
+        }
+        if self.bold {
+            parts.push("font-weight: bold".to_string());
+        }
+        if self.italic {
+            parts.push("font-style: italic".to_string());
+        }
+        if self.underline {
+            parts.push("text-decoration: underline".to_string());
+        }
+        parts.join("; ")
+    }
+}
+
 /// Escape HTML special characters
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -310,6 +405,17 @@ pub fn generate_html_for_single_file(
         ("#ffffff".to_string(), "#000000".to_string())
     };
 
+    // Phase 1: Collect syntax highlighting data and CSS classes
+    let (all_lines, style_to_class) = if let Some(theme) = theme {
+        let (lines, classes) = collect_highlight_spans(&content, syntax_set, theme);
+        (Some(lines), classes)
+    } else {
+        (None, HashMap::new())
+    };
+
+    // Phase 2: Build HTML with CSS classes included in the <head> <style> block
+    let extra_css = generate_css_classes(&style_to_class);
+    
     let mut html = format!(r#"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -363,7 +469,7 @@ pub fn generate_html_for_single_file(
         .line-content {{
             display: inline;
         }}
-    </style>
+{extra_css}    </style>
 </head>
 <body>
 <div class="file-header">{path}</div>
@@ -374,39 +480,12 @@ pub fn generate_html_for_single_file(
         line_num_size = font_size,
         bg_color = bg_color,
         fg_color = fg_color,
+        extra_css = extra_css,
     );
     
-    // Highlight each line (or just escape if no theme)
-    if let Some(theme) = theme {
-        let syntax = syntax_set.find_syntax_by_extension("rs")
-            .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
-        
-        let mut highlighter = HighlightLines::new(syntax, theme);
-        
-        for (line_num, line) in LinesWithEndings::from(&content).enumerate() {
-            let highlighted = highlighter.highlight_line(line, syntax_set)
-                .unwrap_or_else(|_| vec![(Style::default(), line)]);
-            
-            html.push_str(&format!(
-                r#"<span class="line"><span class="line-number">{}</span><span class="line-content">"#,
-                line_num + 1
-            ));
-            
-            for (style, text) in highlighted {
-                let css = style_to_css(&style);
-                if css.is_empty() {
-                    html.push_str(&html_escape(text));
-                } else {
-                    html.push_str(&format!(
-                        r#"<span style="{}">{}</span>"#,
-                        css,
-                        html_escape(text)
-                    ));
-                }
-            }
-            
-            html.push_str("</span></span>\n");
-        }
+    // Phase 3: Write highlighted code lines using CSS classes
+    if let Some(ref lines) = all_lines {
+        write_highlighted_lines(&mut html, lines, &style_to_class);
     } else {
         for (line_num, line) in LinesWithEndings::from(&content).enumerate() {
             html.push_str(&format!(
