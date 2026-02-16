@@ -320,9 +320,30 @@ fn main() -> Result<()> {
         let mut fonts: BTreeMap<String, Base64OrRaw> = BTreeMap::new();
         fonts.insert("RobotoMono".to_string(), Base64OrRaw::Raw((*font_bytes).clone()));
         
+        // Build font pool ONCE and share across all from_html calls.
+        // This shares both fontconfig metadata AND parsed font binaries,
+        // so fonts are loaded from disk only on the first render.
+        let fc_cache_start = Instant::now();
+        let raw_fonts: BTreeMap<String, Vec<u8>> = fonts.iter().map(|(k, v)| {
+            let bytes = match v {
+                Base64OrRaw::Raw(b) => b.clone(),
+                Base64OrRaw::B64(_) => Vec::new(), // git2pdf never uses Base64
+            };
+            (k.clone(), bytes)
+        }).collect();
+        let font_pool = printpdf::html::build_font_pool(
+            &raw_fonts,
+            Some(&["monospace"]),
+        );
+        if args.verbose {
+            println!("  Font pool built in {:?} (shared across all files)", fc_cache_start.elapsed());
+        }
+
         let mut title_warnings = Vec::new();
-        let mut title_doc = PdfDocument::from_html(&title_html, &BTreeMap::new(), &fonts, &pdf_options, &mut title_warnings)
-            .map_err(|e| anyhow::anyhow!("Failed to generate title page: {}", e))?;
+        let mut title_doc = PdfDocument::from_html_with_cache(
+            &title_html, &BTreeMap::new(), &fonts, &pdf_options, &mut title_warnings,
+            Some(font_pool.clone()),
+        ).map_err(|e| anyhow::anyhow!("Failed to generate title page: {}", e))?;
 
         if args.verbose {
             println!("  Generated title page ({} page(s))", title_doc.page_count());
@@ -335,9 +356,10 @@ fn main() -> Result<()> {
         let font_bytes_clone = Arc::clone(&font_bytes);
         let syntax_set_clone = Arc::clone(&syntax_set);
         let theme_set_clone = Arc::clone(&theme_set);
+        let font_pool_clone = font_pool.clone();
 
         let file_pdfs: Vec<Result<(String, PdfDocument)>> = source_files
-            .par_iter()
+            .iter()
             .map(|file| {
                 // Get theme reference for this thread
                 let theme: Option<&Theme> = if theme_name.to_lowercase() == "none" {
@@ -354,10 +376,12 @@ fn main() -> Result<()> {
                 let mut fonts: BTreeMap<String, Base64OrRaw> = BTreeMap::new();
                 fonts.insert("RobotoMono".to_string(), Base64OrRaw::Raw((*font_bytes_clone).clone()));
                 
-                // Generate PDF
+                // Generate PDF (reusing shared font pool — fonts loaded from disk only once)
                 let mut warnings = Vec::new();
-                let doc = PdfDocument::from_html(&html, &BTreeMap::new(), &fonts, &pdf_opts, &mut warnings)
-                    .map_err(|e| anyhow::anyhow!("Failed to generate PDF for {}: {}", file.relative_path.display(), e))?;
+                let doc = PdfDocument::from_html_with_cache(
+                    &html, &BTreeMap::new(), &fonts, &pdf_opts, &mut warnings,
+                    Some(font_pool_clone.clone()),
+                ).map_err(|e| anyhow::anyhow!("Failed to generate PDF for {}: {}", file.relative_path.display(), e))?;
                 
                 Ok((file.relative_path.to_string_lossy().to_string(), doc))
             })

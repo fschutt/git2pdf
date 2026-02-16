@@ -22,7 +22,7 @@ clap = { version = "4", features = ["derive"] }
 # PDF generation with HTML support
 # Use local path for development - change to git for release
 # html_multithreaded enables parallel font loading for faster startup
-printpdf = { git = "https://github.com/fschutt/printpdf", rev = "271f44f", features = ["html_multithreaded"] }
+printpdf = { path = "../printpdf", features = ["html_multithreaded"] }
 
 # Syntax highlighting
 syntect = "5"
@@ -44,6 +44,12 @@ ignore = "0.4"
 # URL parsing
 url = "2"
 
+[profile.release]
+debug = true
+
 [[bin]]
 name = "git2pdf"
 path = "src/main.rs"
+
+[patch.crates-io]
+rust-fontconfig = { path = "../rust-fontconfig" }
