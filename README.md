@@ -2,6 +2,20 @@
 
 Convert git repositories to PDF for code review.
 
+## Installation
+
+Linux / macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fschutt/git2pdf/master/install.sh | sh
+```
+
+Windows:
+
+```bash
+irm https://raw.githubusercontent.com/fschutt/git2pdf/master/install.ps1 | iex
+```
+
 ## Features
 
 - Clone any GitHub repository via URL or use local paths
