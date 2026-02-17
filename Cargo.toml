@@ -49,6 +49,3 @@ debug = true
 [[bin]]
 name = "git2pdf"
 path = "src/main.rs"
-
-[patch.crates-io]
-rust-fontconfig = { path = "../rust-fontconfig" }
