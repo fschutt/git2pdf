@@ -358,9 +358,10 @@ fn main() -> Result<()> {
         let theme_set_clone = Arc::clone(&theme_set);
         let font_pool_clone = font_pool.clone();
 
-        let file_pdfs: Vec<Result<(String, PdfDocument)>> = source_files
+        let file_pdfs: Vec<Result<(String, PdfDocument, usize, std::time::Duration)>> = source_files
             .iter()
             .map(|file| {
+                let file_start = std::time::Instant::now();
                 // Get theme reference for this thread
                 let theme: Option<&Theme> = if theme_name.to_lowercase() == "none" {
                     None
@@ -368,6 +369,11 @@ fn main() -> Result<()> {
                     theme_set_clone.themes.get(&theme_name)
                         .or_else(|| theme_set_clone.themes.get("InspiredGitHub"))
                 };
+
+                // Count lines of code
+                let loc = std::fs::read_to_string(&file.path)
+                    .map(|s| s.lines().count())
+                    .unwrap_or(0);
 
                 // Generate HTML for this file
                 let html = generate_html_for_single_file(file, &syntax_set_clone, theme, font_size)?;
@@ -383,7 +389,8 @@ fn main() -> Result<()> {
                     Some(font_pool_clone.clone()),
                 ).map_err(|e| anyhow::anyhow!("Failed to generate PDF for {}: {}", file.relative_path.display(), e))?;
                 
-                Ok((file.relative_path.to_string_lossy().to_string(), doc))
+                let elapsed = file_start.elapsed();
+                Ok((file.relative_path.to_string_lossy().to_string(), doc, loc, elapsed))
             })
             .collect();
 
@@ -391,11 +398,11 @@ fn main() -> Result<()> {
         let mut file_count = 0;
         for result in file_pdfs {
             match result {
-                Ok((path, doc)) => {
+                Ok((path, doc, loc, elapsed)) => {
                     title_doc.append_document(doc);
                     file_count += 1;
                     if args.verbose {
-                        println!("  Added: {} ({} pages total)", path, title_doc.page_count());
+                        println!("  Added: {} ({} LOC, {} pages total, {:.1?})", path, loc, title_doc.page_count(), elapsed);
                     }
                 }
                 Err(e) => {
