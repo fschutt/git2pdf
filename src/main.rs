@@ -14,8 +14,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use ignore::WalkBuilder;
-use printpdf::{Base64OrRaw, GeneratePdfOptions, PdfDocument, PdfSaveOptions};
-use rayon::prelude::*;
+use printpdf::{Base64OrRaw, GeneratePdfOptions, PdfDocument, PdfParseOptions, PdfSaveOptions};
 use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
@@ -35,8 +34,8 @@ use html_generator::{generate_html_for_single_file, generate_title_page_html};
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Git repository URL or local file path
-    #[arg(value_name = "SOURCE")]
-    source: String,
+    #[arg(value_name = "SOURCE", required_unless_present = "file")]
+    source: Option<String>,
 
     /// Branch, tag, or commit to checkout (default: tries 'main', then 'master')
     #[arg(short, long)]
@@ -97,6 +96,14 @@ struct Args {
     /// Start each source file on a new page
     #[arg(long)]
     page_break: bool,
+
+    /// Process files in parallel using rayon
+    #[arg(long)]
+    parallel: bool,
+
+    /// Process a single file directly (bypasses git/crate logic, for benchmarking)
+    #[arg(long)]
+    file: Option<PathBuf>,
 }
 
 /// Parse paper size from "WIDTHxHEIGHT" format (in mm)
@@ -131,6 +138,21 @@ fn parse_margins(s: &str) -> Result<(f32, f32, f32, f32)> {
 fn main() -> Result<()> {
     let args = Args::parse();
     let start = Instant::now();
+
+    // Configure rayon thread pool to use n-1 cores (leave one core free for OS)
+    if args.parallel {
+        let num_cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let num_threads = num_cpus.saturating_sub(1).max(1);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build_global()
+            .ok(); // ignore error if already initialized
+        if args.verbose {
+            println!("[{:?}] Parallel mode: using {} of {} cores", start.elapsed(), num_threads, num_cpus);
+        }
+    }
     
     // Parse paper size
     let (paper_width, paper_height) = parse_paper_size(&args.paper_size)?;
@@ -140,17 +162,32 @@ fn main() -> Result<()> {
 
     if args.verbose {
         println!("[{:?}] git2pdf - Converting repository to PDF", start.elapsed());
-        println!("[{:?}] Source: {}", start.elapsed(), args.source);
+        if let Some(ref s) = args.source {
+            println!("[{:?}] Source: {}", start.elapsed(), s);
+        }
         println!("[{:?}] Paper size: {}x{} mm", start.elapsed(), paper_width, paper_height);
         println!("[{:?}] Margins: top={}, right={}, bottom={}, left={} mm", 
                  start.elapsed(), margin_top, margin_right, margin_bottom, margin_left);
     }
 
+    // Single-file mode: bypass all git/crate logic
+    if let Some(ref file_path) = args.file {
+        return process_single_file(
+            file_path,
+            &args,
+            paper_width, paper_height,
+            margin_top, margin_right, margin_bottom, margin_left,
+        );
+    }
+
+    // From here on, source is required (guaranteed by clap's required_unless_present)
+    let source = args.source.as_ref().unwrap();
+
     // Determine if source is a URL or local path
-    let is_remote = args.source.starts_with("http://") 
-        || args.source.starts_with("https://") 
-        || args.source.starts_with("git@") 
-        || args.source.starts_with("ssh://");
+    let is_remote = source.starts_with("http://") 
+        || source.starts_with("https://") 
+        || source.starts_with("git@") 
+        || source.starts_with("ssh://");
 
     // Setup temp directory
     let temp_dir = args.temp_dir.clone().unwrap_or_else(|| {
@@ -160,14 +197,14 @@ fn main() -> Result<()> {
 
     // Get source path (clone if remote, use directly if local)
     let source_path = if is_remote {
-        let repo_name = extract_repo_name(&args.source)?;
+        let repo_name = extract_repo_name(&source)?;
         let clone_path = temp_dir.join(&repo_name);
         
         if args.verbose {
             println!("[{:?}] Cloning to: {}", start.elapsed(), clone_path.display());
         }
         
-        clone_or_open_repo(&args.source, &clone_path, args.verbose)?;
+        clone_or_open_repo(&source, &clone_path, args.verbose)?;
         
         // Checkout the specified ref if provided
         if let Some(ref git_ref) = args.r#ref {
@@ -179,7 +216,7 @@ fn main() -> Result<()> {
         
         clone_path
     } else {
-        let local_path = PathBuf::from(&args.source);
+        let local_path = PathBuf::from(&*source);
         if !local_path.exists() {
             bail!("Repository path does not exist: {}", local_path.display());
         }
@@ -214,19 +251,24 @@ fn main() -> Result<()> {
         work_path
     };
 
-    // Run cargo fmt on work directory (unless disabled)
-    if !args.no_fmt {
-        if args.verbose {
-            println!("[{:?}] Running cargo fmt with line width {}...", start.elapsed(), args.line_width);
-        }
-        run_cargo_fmt(&work_dir, args.line_width, args.verbose)?;
-    }
-
     // Discover crates in the repository
     if args.verbose {
         println!("[{:?}] Discovering crates...", start.elapsed());
     }
     let crates = discover_crates(&work_dir)?;
+
+    // Run cargo fmt per-crate (unless disabled)
+    // We format per-crate instead of the whole workspace because submodule
+    // dependencies (e.g. webrender) may not be present in the work directory,
+    // which would cause `cargo fmt` on the root workspace to fail.
+    if !args.no_fmt {
+        if args.verbose {
+            println!("[{:?}] Running cargo fmt with line width {}...", start.elapsed(), args.line_width);
+        }
+        for c in &crates {
+            run_cargo_fmt(&c.path, args.line_width, args.verbose)?;
+        }
+    }
     
     if crates.is_empty() {
         bail!("No Rust crates found in repository");
@@ -313,21 +355,16 @@ fn main() -> Result<()> {
             println!("  Found {} source file(s), processing in parallel...", source_files.len());
         }
 
-        // Generate title page first
-        let title_html = generate_title_page_html(crate_info, git_hash.as_deref(), args.font_size);
-        
         // Create fonts map for PDF generation
         let mut fonts: BTreeMap<String, Base64OrRaw> = BTreeMap::new();
         fonts.insert("RobotoMono".to_string(), Base64OrRaw::Raw((*font_bytes).clone()));
         
         // Build font pool ONCE and share across all from_html calls.
-        // This shares both fontconfig metadata AND parsed font binaries,
-        // so fonts are loaded from disk only on the first render.
         let fc_cache_start = Instant::now();
         let raw_fonts: BTreeMap<String, Vec<u8>> = fonts.iter().map(|(k, v)| {
             let bytes = match v {
                 Base64OrRaw::Raw(b) => b.clone(),
-                Base64OrRaw::B64(_) => Vec::new(), // git2pdf never uses Base64
+                Base64OrRaw::B64(_) => Vec::new(),
             };
             (k.clone(), bytes)
         }).collect();
@@ -339,17 +376,8 @@ fn main() -> Result<()> {
             println!("  Font pool built in {:?} (shared across all files)", fc_cache_start.elapsed());
         }
 
-        let mut title_warnings = Vec::new();
-        let mut title_doc = PdfDocument::from_html_with_cache(
-            &title_html, &BTreeMap::new(), &fonts, &pdf_options, &mut title_warnings,
-            Some(font_pool.clone()),
-        ).map_err(|e| anyhow::anyhow!("Failed to generate title page: {}", e))?;
-
-        if args.verbose {
-            println!("  Generated title page ({} page(s))", title_doc.page_count());
-        }
-
-        // Process each source file in parallel
+        // Phase 1: Render each source file to an individual PDF on disk.
+        // This avoids holding all PdfDocuments in memory at once (OOM on large crates).
         let theme_name = args.theme.clone();
         let font_size = args.font_size;
         let pdf_opts = pdf_options.clone();
@@ -358,73 +386,231 @@ fn main() -> Result<()> {
         let theme_set_clone = Arc::clone(&theme_set);
         let font_pool_clone = font_pool.clone();
 
-        let file_pdfs: Vec<Result<(String, PdfDocument, usize, std::time::Duration)>> = source_files
-            .iter()
-            .map(|file| {
-                let file_start = std::time::Instant::now();
-                // Get theme reference for this thread
-                let theme: Option<&Theme> = if theme_name.to_lowercase() == "none" {
-                    None
-                } else {
-                    theme_set_clone.themes.get(&theme_name)
-                        .or_else(|| theme_set_clone.themes.get("InspiredGitHub"))
-                };
+        let cache_dir = temp_dir.join(format!("{}-cache", crate_info.name));
+        fs::create_dir_all(&cache_dir)?;
 
-                // Count lines of code
-                let loc = std::fs::read_to_string(&file.path)
-                    .map(|s| s.lines().count())
-                    .unwrap_or(0);
+        let process_file = |file: &SourceFile| -> Result<(String, PathBuf, usize, std::time::Duration)> {
+            let file_start = std::time::Instant::now();
+            let theme: Option<&Theme> = if theme_name.to_lowercase() == "none" {
+                None
+            } else {
+                theme_set_clone.themes.get(&theme_name)
+                    .or_else(|| theme_set_clone.themes.get("InspiredGitHub"))
+            };
 
-                // Generate HTML for this file
-                let html = generate_html_for_single_file(file, &syntax_set_clone, theme, font_size)?;
-                
-                // Create fonts map
-                let mut fonts: BTreeMap<String, Base64OrRaw> = BTreeMap::new();
-                fonts.insert("RobotoMono".to_string(), Base64OrRaw::Raw((*font_bytes_clone).clone()));
-                
-                // Generate PDF (reusing shared font pool — fonts loaded from disk only once)
-                let mut warnings = Vec::new();
-                let doc = PdfDocument::from_html_with_cache(
-                    &html, &BTreeMap::new(), &fonts, &pdf_opts, &mut warnings,
-                    Some(font_pool_clone.clone()),
-                ).map_err(|e| anyhow::anyhow!("Failed to generate PDF for {}: {}", file.relative_path.display(), e))?;
-                
-                let elapsed = file_start.elapsed();
-                Ok((file.relative_path.to_string_lossy().to_string(), doc, loc, elapsed))
-            })
-            .collect();
+            let loc = std::fs::read_to_string(&file.path)
+                .map(|s| s.lines().count())
+                .unwrap_or(0);
 
-        // Combine all file PDFs into the main document
-        let mut file_count = 0;
-        for result in file_pdfs {
+            let html_start = std::time::Instant::now();
+            let html = generate_html_for_single_file(file, &syntax_set_clone, theme, font_size)?;
+            let html_elapsed = html_start.elapsed();
+
+            let mut file_fonts: BTreeMap<String, Base64OrRaw> = BTreeMap::new();
+            file_fonts.insert("RobotoMono".to_string(), Base64OrRaw::Raw((*font_bytes_clone).clone()));
+
+            let pdf_start = std::time::Instant::now();
+            let mut warnings = Vec::new();
+            let doc = PdfDocument::from_html_with_cache(
+                &html, &BTreeMap::new(), &file_fonts, &pdf_opts, &mut warnings,
+                Some(font_pool_clone.clone()),
+            ).map_err(|e| anyhow::anyhow!("Failed to generate PDF for {}: {}", file.relative_path.display(), e))?;
+            let pdf_elapsed = pdf_start.elapsed();
+
+            // Save to disk immediately, then drop to free memory
+            let safe_name = file.relative_path.to_string_lossy()
+                .replace('/', "__")
+                .replace('\\', "__");
+            let cache_path = cache_dir.join(format!("{}.pdf", safe_name));
+            {
+                let save_options = PdfSaveOptions::default();
+                let mut save_warnings = Vec::new();
+                let bytes = doc.save(&save_options, &mut save_warnings);
+                fs::write(&cache_path, bytes)?;
+            }
+
+            eprintln!("    [detail] {} ({} LOC, {} bytes HTML): html_gen={:.1?}, pdf_render={:.1?}",
+                file.relative_path.display(), loc, html.len(), html_elapsed, pdf_elapsed);
+
+            Ok((file.relative_path.to_string_lossy().to_string(), cache_path, loc, file_start.elapsed()))
+        };
+
+        let file_results: Vec<Result<(String, PathBuf, usize, std::time::Duration)>> = if args.parallel {
+            use rayon::prelude::*;
+            source_files.par_iter().map(process_file).collect()
+        } else {
+            source_files.iter().map(process_file).collect()
+        };
+
+        // Collect successful results (preserving source file order)
+        let mut cached_files: Vec<(String, PathBuf, usize, std::time::Duration)> = Vec::new();
+        for result in file_results {
             match result {
-                Ok((path, doc, loc, elapsed)) => {
-                    title_doc.append_document(doc);
-                    file_count += 1;
-                    if args.verbose {
-                        println!("  Added: {} ({} LOC, {} pages total, {:.1?})", path, loc, title_doc.page_count(), elapsed);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("  Warning: {}", e);
-                }
+                Ok(info) => cached_files.push(info),
+                Err(e) => eprintln!("  Warning: {}", e),
+            }
+        }
+
+        // Phase 2: Generate title page in-memory, then append each cached file PDF one by one.
+        let title_html = generate_title_page_html(crate_info, git_hash.as_deref(), args.font_size);
+        let mut title_warnings = Vec::new();
+        let mut combined_doc = PdfDocument::from_html_with_cache(
+            &title_html, &BTreeMap::new(), &fonts, &pdf_options, &mut title_warnings,
+            Some(font_pool.clone()),
+        ).map_err(|e| anyhow::anyhow!("Failed to generate title page: {}", e))?;
+
+        if args.verbose {
+            println!("  Title page: {} page(s). Appending {} file PDFs...", combined_doc.page_count(), cached_files.len());
+        }
+
+        let mut file_count = 0;
+        for (path, cache_path, loc, elapsed) in &cached_files {
+            let file_bytes = fs::read(cache_path)?;
+            let file_doc = PdfDocument::parse(
+                &file_bytes, &PdfParseOptions::default(), &mut Vec::new(),
+            ).map_err(|e| anyhow::anyhow!("Failed to reload {}: {}", path, e))?;
+            drop(file_bytes);
+            combined_doc.append_document(file_doc);
+            file_count += 1;
+            if args.verbose {
+                println!("  Added: {} ({} LOC, {} pages total, {:.1?})", path, loc, combined_doc.page_count(), elapsed);
             }
         }
 
         if args.verbose {
-            println!("  Combined {} files into {} pages", file_count, title_doc.page_count());
+            println!("  Combined {} files into {} pages", file_count, combined_doc.page_count());
         }
 
-        // Save PDF
+        // Save final PDF
         let output_path = args.output.join(format!("{}.pdf", crate_info.name));
         let save_options = PdfSaveOptions::default();
         let mut save_warnings = Vec::new();
-        let bytes = title_doc.save(&save_options, &mut save_warnings);
+        let bytes = combined_doc.save(&save_options, &mut save_warnings);
         fs::write(&output_path, bytes)?;
-        println!("Created: {} ({} pages)", output_path.display(), title_doc.page_count());
+        println!("Created: {} ({} pages)", output_path.display(), combined_doc.page_count());
+
+        // Clean up cache directory
+        let _ = fs::remove_dir_all(&cache_dir);
     }
 
     println!("\nDone in {:?}!", start.elapsed());
+    Ok(())
+}
+
+/// Process a single file directly — bypasses git/crate discovery.
+/// Useful for benchmarking layout performance on files of varying size.
+fn process_single_file(
+    file_path: &Path,
+    args: &Args,
+    paper_width: f32, paper_height: f32,
+    margin_top: f32, margin_right: f32, margin_bottom: f32, margin_left: f32,
+) -> Result<()> {
+    use std::time::Instant;
+
+    if !file_path.exists() {
+        bail!("File not found: {}", file_path.display());
+    }
+
+    let total_start = Instant::now();
+    let file_name = file_path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+
+    // Read file content and count LOC
+    let content = fs::read_to_string(file_path)
+        .with_context(|| format!("Failed to read: {}", file_path.display()))?;
+    let loc = content.lines().count();
+    let content_bytes = content.len();
+    eprintln!("[timing] file={}, LOC={}, bytes={}", file_name, loc, content_bytes);
+
+    // Setup syntax highlighting
+    let t0 = Instant::now();
+    let syntax_set = SyntaxSet::load_defaults_newlines();
+    let theme_set = ThemeSet::load_defaults();
+    let theme: Option<&Theme> = if args.theme.to_lowercase() == "none" {
+        None
+    } else {
+        theme_set.themes.get(&args.theme)
+            .or_else(|| theme_set.themes.get("InspiredGitHub"))
+    };
+    eprintln!("[timing] syntax_load: {:.1?}", t0.elapsed());
+
+    // Create SourceFile struct
+    let source_file = SourceFile {
+        path: file_path.to_path_buf(),
+        relative_path: PathBuf::from(&file_name),
+        category: FileCategory::Source,
+        module_path: String::new(),
+    };
+
+    // Generate HTML
+    let t1 = Instant::now();
+    let html = generate_html_for_single_file(&source_file, &syntax_set, theme, args.font_size)?;
+    let html_elapsed = t1.elapsed();
+    eprintln!("[timing] html_generation: {:.1?} ({} bytes HTML)", html_elapsed, html.len());
+
+    // Setup fonts
+    let t2 = Instant::now();
+    let font_bytes: Vec<u8> = if let Some(ref font_path) = args.font {
+        fs::read(font_path)?
+    } else {
+        include_bytes!("../fonts/RobotoMono-Bold.ttf").to_vec()
+    };
+    let mut fonts: BTreeMap<String, Base64OrRaw> = BTreeMap::new();
+    fonts.insert("RobotoMono".to_string(), Base64OrRaw::Raw(font_bytes.clone()));
+
+    let raw_fonts: BTreeMap<String, Vec<u8>> = fonts.iter().map(|(k, v)| {
+        let bytes = match v {
+            Base64OrRaw::Raw(b) => b.clone(),
+            Base64OrRaw::B64(_) => Vec::new(),
+        };
+        (k.clone(), bytes)
+    }).collect();
+    let font_pool = printpdf::html::build_font_pool(&raw_fonts, Some(&["monospace"]));
+    let font_elapsed = t2.elapsed();
+    eprintln!("[timing] font_pool_build: {:.1?}", font_elapsed);
+
+    // PDF generation options
+    let pdf_options = GeneratePdfOptions {
+        page_width: Some(paper_width),
+        page_height: Some(paper_height),
+        margin_top: Some(margin_top),
+        margin_right: Some(margin_right),
+        margin_bottom: Some(margin_bottom),
+        margin_left: Some(margin_left),
+        show_page_numbers: Some(false),
+        ..Default::default()
+    };
+
+    // Generate PDF (the main bottleneck we're benchmarking)
+    let t3 = Instant::now();
+    let mut warnings = Vec::new();
+    let doc = PdfDocument::from_html_with_cache(
+        &html, &BTreeMap::new(), &fonts, &pdf_options, &mut warnings,
+        Some(font_pool),
+    ).map_err(|e| anyhow::anyhow!("Failed to generate PDF: {}", e))?;
+    let pdf_elapsed = t3.elapsed();
+    let pages = doc.page_count();
+    eprintln!("[timing] pdf_render: {:.1?} ({} pages)", pdf_elapsed, pages);
+
+    // Save PDF
+    let t4 = Instant::now();
+    let output_path = args.output.join(format!("{}.pdf", file_name.trim_end_matches(".rs")));
+    let save_options = PdfSaveOptions::default();
+    let mut save_warnings = Vec::new();
+    let bytes = doc.save(&save_options, &mut save_warnings);
+    let pdf_bytes = bytes.len();
+    fs::write(&output_path, bytes)?;
+    let save_elapsed = t4.elapsed();
+    eprintln!("[timing] pdf_save: {:.1?} ({} bytes)", save_elapsed, pdf_bytes);
+
+    let total = total_start.elapsed();
+    eprintln!("[timing] TOTAL: {:.1?}", total);
+    eprintln!("[summary] {} | {} LOC | {} HTML bytes | {} pages | html={:.0?} pdf={:.0?} save={:.0?} total={:.0?}",
+        file_name, loc, html.len(), pages,
+        html_elapsed, pdf_elapsed, save_elapsed, total);
+
+    println!("Created: {} ({} pages)", output_path.display(), pages);
     Ok(())
 }
 
@@ -468,7 +654,8 @@ fn run_cargo_fmt(repo_path: &Path, line_width: u32, verbose: bool) -> Result<()>
     
     let output = Command::new("cargo")
         .arg("fmt")
-        .current_dir(repo_path)
+        .arg("--manifest-path")
+        .arg(repo_path.join("Cargo.toml"))
         .output()
         .context("Failed to run cargo fmt. Is cargo installed?")?;
     
@@ -496,29 +683,28 @@ fn copy_repo_files(src: &Path, dst: &Path, verbose: bool) -> Result<()> {
         fs::remove_dir_all(dst)?;
     }
     fs::create_dir_all(dst)?;
-    
-    // Use ignore crate to walk files respecting .gitignore
+
     let walker = WalkBuilder::new(src)
         .hidden(false)           // Include hidden files (like .gitignore itself)
         .git_ignore(true)        // Respect .gitignore
         .git_global(true)        // Respect global gitignore
         .git_exclude(true)       // Respect .git/info/exclude
         .build();
-    
+
     let mut file_count = 0;
     for entry in walker {
         let entry = entry?;
         let path = entry.path();
-        
+
         // Skip the .git directory
         if path.components().any(|c| c.as_os_str() == ".git") {
             continue;
         }
-        
+
         // Get relative path
         let rel_path = path.strip_prefix(src).unwrap_or(path);
         let dst_path = dst.join(rel_path);
-        
+
         if path.is_dir() {
             fs::create_dir_all(&dst_path)?;
         } else if path.is_file() {

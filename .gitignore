@@ -4,5 +4,11 @@ output/
 .DS_Store
 *.pdf
 *.py
+*.trace
+*.json.gz
+*.json
+*.log
 *.md
 *.txt
+bench_output/
+azul_output/

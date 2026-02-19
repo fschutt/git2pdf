@@ -46,6 +46,12 @@ url = "2"
 [profile.release]
 debug = true
 
+[patch.crates-io]
+printpdf = { path = "../printpdf" }
+azul-css = { path = "../azul/css" }
+azul-core = { path = "../azul/core" }
+azul-layout = { path = "../azul/layout" }
+
 [[bin]]
 name = "git2pdf"
 path = "src/main.rs"
